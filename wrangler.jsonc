@@ -1,0 +1,17 @@
+{
+  // Настройки Cloudflare. Имя можно поменять — от него зависит адрес сайта: <name>.<ваш-аккаунт>.workers.dev
+  "name": "mirovaya-derzhava",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-10-01",
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "LOBBY", "class_name": "Lobby" },
+      { "name": "ROOM",  "class_name": "Room" }
+    ]
+  },
+  // SQLite-хранилище — работает на бесплатном тарифе Cloudflare
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Lobby", "Room"] }
+  ]
+}
