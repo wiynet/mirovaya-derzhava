@@ -77,4 +77,5 @@ server.on('upgrade', (req, socket) => {
   r.connect(conn); report(m[1]);
 });
 
+setInterval(() => { for (const r of rooms.values()) r.tick(Date.now()); }, 500);
 server.listen(PORT, () => console.log(`Мировая держава: http://localhost:${PORT}`));

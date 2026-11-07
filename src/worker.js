@@ -105,6 +105,7 @@ export class Room extends DurableObject {
     const conn = this.conn(server);
     this.core.connect(conn);   // if the room already has 50 players the client gets {t:'full'} and moves to another room
     await this.report();
+    await this.schedule();
     return new Response(null, {status: 101, webSocket: client});
   }
   async webSocketMessage(ws, raw){
@@ -113,6 +114,16 @@ export class Room extends DurableObject {
     if (!this.core.conns.has(conn)) return;
     this.core.message(conn, msg);
     if (msg.t === 'hello' && conn.pid) ws.serializeAttachment({pid: conn.pid});
+    await this.schedule();
+  }
+  // wake up exactly when the next army arrives / war is justified / revolt check is due
+  async alarm(){ this.core.tick(Date.now()); await this.schedule(); }
+  async schedule(){
+    const t = this.core.nextDue();
+    if (!isFinite(t)) return;
+    const at = Math.max(Date.now() + 250, t);
+    const cur = await this.ctx.storage.getAlarm();
+    if (cur == null || cur > at || cur < Date.now()) await this.ctx.storage.setAlarm(at);
   }
   async webSocketClose(ws){ this.core.close(this.conn(ws)); await this.report(); }
   async webSocketError(ws){ this.core.close(this.conn(ws)); await this.report(); }
