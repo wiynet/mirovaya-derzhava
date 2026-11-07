@@ -1662,7 +1662,7 @@ async function boot(){
   W = window.innerWidth; H = window.innerHeight;
   view = homeView();
   resize();
-  gameData = prepareData({c: cities.map(c => [c.id, c.c, c.p, c.la, c.lo, c.cap === 1 ? 1 : 0, c.n]), n: Object.fromEntries(countries.filter(c => c.i2).map(c => [c.i2, c.ru]))});
+  gameData = prepareData({c: cities.map(c => [c.id, c.c, c.p, c.la, c.lo, c.cap === 1 ? 1 : 0, c.n]), n: Object.fromEntries(countries.filter(c => c.i2).map(c => [c.i2, c.ru])), g: Object.fromEntries(countries.filter(c => c.i2 && c.gdp).map(c => [c.i2, c.gdp]))});
   $('#loading').style.display = 'none';
   initStart();
   // territory shapes are only needed for highlighting the chosen city: load them after the map is up
