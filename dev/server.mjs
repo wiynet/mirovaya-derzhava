@@ -9,6 +9,7 @@ import {RoomCore, prepareData, RULES} from '../public/game.js';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../public');
 const DATA = prepareData(JSON.parse(fs.readFileSync(path.join(ROOT, 'data/game.json'), 'utf8')));
 const PORT = +process.env.PORT || 8787;
+if (process.env.FAST) RULES.JUSTIFY_MS = 4000;   // quick wars for testing
 const TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.css': 'text/css'};
 
 const rooms = new Map();        // name -> RoomCore

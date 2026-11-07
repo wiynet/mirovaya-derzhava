@@ -324,7 +324,7 @@ body[data-mode="start"] #searchWrap,body[data-mode="start"] #zoomCtl{visibility:
 <div id="loading"><div class="spin"></div><div>Загружаю карту мира…</div></div>
 
 <script type="module">
-import {RULES, RoomCore, prepareData, cityView, moneyAt, moodAt, moodTarget, nukeStage, warheads, nukeStageCost, nukeStageMs, baseIncome, econCost, armyCap, distKm, travelMs, armyPos, atWar, warsOf, diploCost, justifyMs, makeBot} from './game.js';
+import {RULES, RoomCore, prepareData, cityView, moneyAt, moodAt, moodTarget, nukeStage, warheads, nukeStageCost, nukeStageMs, baseIncome, econCost, armyCap, distKm, travelMs, armyPos, atWar, isAlly, warsOf, diploCost, justifyMs, findRoute, passLoss, makeBot} from './game.js';
 const T = 256;                                   // world size in "world units" (web-mercator)
 const $ = s => document.querySelector(s);
 const canvas = $('#map'), ctx = canvas.getContext('2d');
@@ -997,11 +997,13 @@ function renderCityPanel(){
         <button class="act" data-a="recruit" data-n="100" ${!n || money < RULES.ARMY_COST ? 'disabled' : ''}>➕ 100 солдат<small>💰 ${fmtInt(100 * RULES.ARMY_COST)}</small></button>
       </div>`;
   } else if (G.mode === 'play' && me && me.cc){
-    if (!v.o || atWar(G, G.you, v.o)){
-      actions = `<button class="act red big" data-a="sendHere">⚔ Атаковать этот город</button>`;
-      if (v.o && warheads(me, now) > 0) actions += `<button class="act nuke" data-a="nukeThis">☢ Ядерный удар</button>`;
-      if (v.o) actions += diploButton(v.o);
-    } else actions = diploButton(v.o);
+    if (v.o){
+      actions = diploButton(v.o);
+      if (atWar(G, G.you, v.o)){
+        actions = `<div class="note">⚔ Идёт война. Чтобы напасть, нажмите на солдат у своего города рядом и выберите этот город.</div>` + actions;
+        if (warheads(me, now) > 0) actions += `<button class="act nuke" data-a="nukeThis">☢ Ядерный удар</button>`;
+      }
+    } else actions = `<div class="note">Город никому не принадлежит. Чтобы захватить, отправьте сюда армию из своего города.</div>`;
   }
   const html = `
     <button class="x" aria-label="Закрыть" id="cpx">×</button>
@@ -1022,7 +1024,6 @@ function cityAction(a, n){
   if (a === 'econ') G.send({t: 'act', a: {type: 'econ', city: c.id}});
   else if (a === 'recruit') G.send({t: 'act', a: {type: 'recruit', city: c.id, n}});
   else if (a === 'send') startTarget(c);
-  else if (a === 'sendHere') openSend(null, c);
   else if (a === 'nukeThis') openNuke(c);
 }
 function closeCity(){ G._panelHtml = null; selCity = null; $('#cityPanel').classList.remove('open'); document.body.classList.remove('city-open'); schedule(); }
@@ -1214,7 +1215,7 @@ window.addEventListener('hashchange', route);
 /* ================================================================
    ИГРА: состояние, сеть, интерфейс
    ================================================================ */
-const G = {mode: 'start', you: null, cc: null, players: {}, cities: {}, taken: {}, news: [], armies: {}, wars: {}, just: {}, offers: {}, truce: {},
+const G = {mode: 'start', you: null, cc: null, players: {}, cities: {}, taken: {}, news: [], armies: {}, wars: {}, just: {}, offers: {}, truce: {}, allies: {}, aoffers: {}, preview: null,
   offset: 0, room: null, online: 0, offline: false, send: () => {}, target: null, foreign: []};
 let gameData = null;
 const srvNow = () => Date.now() + G.offset;
@@ -1247,7 +1248,7 @@ function onMsg(m){
   if (m.t === 'welcome'){
     G.you = m.you; G.room = m.room; G.online = m.online;
     G.players = m.players; G.cities = m.cities; G.taken = m.taken; G.news = m.news || []; G.armies = m.armies || {};
-    Object.assign(G, {wars: m.wars || {}, just: m.just || {}, offers: m.offers || {}, truce: m.truce || {}});
+    Object.assign(G, {wars: m.wars || {}, just: m.just || {}, offers: m.offers || {}, truce: m.truce || {}, allies: m.allies || {}, aoffers: m.aoffers || {}});
     if (m.token && !G.offline) store('md_token_' + m.room, m.token);
     const me = G.players[G.you];
     G.cc = me && me.cc;
@@ -1255,12 +1256,13 @@ function onMsg(m){
     rebuildForeign(); renderNews(); refreshUi();
     if (G.cc){ const k = myCountry(); if (k) flyTo(fitBox(k.fb)); }
     for (const key in G.offers){ const o = G.offers[key]; if (o.to === G.you) showPeaceOffer(o.from, o.until); }
+    for (const key in G.aoffers){ const o = G.aoffers[key]; if (o.to === G.you) showAllyOffer(o.from); }
   } else if (m.t === 'patch'){
     if (m.players) for (const id in m.players){ const old = G.players[id]; G.players[id] = Object.assign(old || {}, m.players[id]); }
     if (m.cities) Object.assign(G.cities, m.cities);
     if (m.taken) Object.assign(G.taken, m.taken);
     if (m.armies) for (const id in m.armies){ if (m.armies[id]) G.armies[id] = m.armies[id]; else delete G.armies[id]; }
-    if (m.wars){ G.wars = m.wars; G.just = m.just; G.offers = m.offers; G.truce = m.truce; }
+    if (m.wars){ G.wars = m.wars; G.just = m.just; G.offers = m.offers; G.truce = m.truce; G.allies = m.allies || {}; G.aoffers = m.aoffers || {}; }
     if (m.news){ G.news.push(...m.news); if (G.news.length > 60) G.news.splice(0, G.news.length - 60); renderNews(m.news); }
     const me = G.players[G.you];
     if (me && me.cc && !G.cc){
@@ -1271,6 +1273,7 @@ function onMsg(m){
     if (m.cities || m.taken) rebuildForeign();
     refreshUi();
   } else if (m.t === 'peaceOffer') showPeaceOffer(m.from, m.until);
+  else if (m.t === 'allyOffer') showAllyOffer(m.from);
   else if (m.t === 'online'){ G.online = m.n; renderServer(); }
   else if (m.t === 'err') toast(m.msg, 'err');
   else if (m.t === 'info') toast(m.msg);
@@ -1424,12 +1427,13 @@ function openBudget(){
 function relation(pid){
   const now = srvNow();
   if (atWar(G, G.you, pid)) return {k: 'war'};
+  if (isAlly(G, G.you, pid)) return {k: 'ally'};
   const j = G.just[G.you + '>' + pid]; if (j) return {k: 'just', left: j.until - now};
   const key = G.you < pid ? G.you + '|' + pid : pid + '|' + G.you;
   if (G.truce[key] && G.truce[key] > now) return {k: 'truce', left: G.truce[key] - now};
   return {k: 'peace'};
 }
-function diploButton(pid, inWarAlready){
+function diploButton(pid, full){
   const me = G.players[G.you], q = G.players[pid]; if (!me || !q || !me.cc || pid === G.you) return '';
   const r = relation(pid);
   if (r.k === 'war'){
@@ -1437,8 +1441,11 @@ function diploButton(pid, inWarAlready){
     return `<button class="act" data-dip="peace" data-pid="${pid}" ${sent ? 'disabled' : ''}>🕊 ${sent ? 'Мир предложен…' : 'Предложить мир'}</button>`;
   }
   if (r.k === 'just') return `<div class="justbar"><span>⏳ Повод для войны: ${fmtTime(r.left)}</span><div><i style="width:${100 - r.left / justifyMs(me.dip) * 100}%"></i></div></div>`;
-  if (r.k === 'truce') return `<div class="note">Перемирие ещё ${fmtTime(r.left)}</div>`;
-  return `<button class="act red big" data-dip="war" data-pid="${pid}">⚔ Объявить войну<small>повод готовится ${fmtTime(justifyMs(me.dip))} · дипломатия ур. ${me.dip}</small></button>`;
+  if (r.k === 'ally') return `<div class="note">🤝 Союзник: ваши армии проходят через города друг друга без потерь.</div>${full ? `<button class="act" data-dip="unally" data-pid="${pid}">Разорвать союз</button>` : ''}`;
+  const sentA = G.aoffers[G.you + '>' + pid];
+  const allyBtn = `<button class="act" data-dip="ally" data-pid="${pid}" ${sentA ? 'disabled' : ''}>🤝 ${sentA ? 'Запрос отправлен…' : 'Предложить союз'}</button>`;
+  if (r.k === 'truce') return `<div class="note">Перемирие ещё ${fmtTime(r.left)}</div>${allyBtn}`;
+  return `<button class="act red big" data-dip="war" data-pid="${pid}">⚔ Объявить войну<small>повод готовится ${fmtTime(justifyMs(me.dip))} · дипломатия ур. ${me.dip}</small></button>${allyBtn}`;
 }
 function wireDiplo(root){
   root.querySelectorAll('[data-dip]').forEach(b => b.onclick = () => {
@@ -1450,24 +1457,29 @@ function wireDiplo(root){
         $('#mGo').onclick = () => { G.send({t: 'act', a: {type: 'war', target: pid}}); closeModal(); };
       });
     else if (b.dataset.dip === 'peace') G.send({t: 'act', a: {type: 'peace', target: pid}});
+    else if (b.dataset.dip === 'ally') G.send({t: 'act', a: {type: 'ally', target: pid}});
+    else if (b.dataset.dip === 'unally') G.send({t: 'act', a: {type: 'unally', target: pid}});
     else if (b.dataset.dip === 'up') G.send({t: 'act', a: {type: 'diplo'}});
   });
 }
 function renderDiplo(){
   const me = G.players[G.you]; if (!me) return;
   const others = Object.values(G.players).filter(p => p.cc && p.id !== G.you);
-  const order = {war: 0, just: 1, truce: 2, peace: 3};
+  const order = {war: 0, just: 1, ally: 2, truce: 3, peace: 4};
   others.sort((a, b) => order[relation(a.id).k] - order[relation(b.id).k] || b.army - a.army);
   const incoming = Object.values(G.offers).filter(o => o.to === G.you);
+  const incomingA = Object.values(G.aoffers).filter(o => o.to === G.you);
   $('#diploPanel').innerHTML = `${closeBtn}<h3>🤝 Дипломатия · ур. ${me.dip}</h3>
     ${me.dip < RULES.DIPLO_MAX ? `<button class="act" data-dip="up">⬆ Улучшить до ур. ${me.dip + 1}<small>💰 ${fmtInt(diploCost(me.dip))} · повод для войны за ${fmtTime(justifyMs(me.dip + 1))}</small></button>` : '<div class="note">Дипломатия на максимуме.</div>'}
     ${incoming.map(o => `<div class="offer">🕊 ${esc(G.players[o.from]?.name || '')} предлагает мир <button class="act sm blue" data-ans="1" data-from="${o.from}">Принять</button><button class="act sm" data-ans="0" data-from="${o.from}">Нет</button></div>`).join('')}
+    ${incomingA.map(o => `<div class="offer">🤝 ${esc(G.players[o.from]?.name || '')} предлагает союз <button class="act sm blue" data-aans="1" data-from="${o.from}">Принять</button><button class="act sm" data-aans="0" data-from="${o.from}">Нет</button></div>`).join('')}
     <div class="dlist">${others.map(p => { const k = byIso.get(p.cc), r = relation(p.id);
       return `<div class="drow"><i class="dot" style="background:${p.color}"></i><span class="dn">${esc(p.name)}<small>${k ? flag(k.i2) + ' ' + esc(k.ru) : ''} · 🪖${fmtShort(p.army || 0)}</small></span>
-        <span class="dst ${r.k}">${{war: '⚔ война', just: '⏳ ' + fmtTime(r.left), truce: '🕊 перемирие', peace: 'мир'}[r.k]}</span></div>
-        <div class="dact">${diploButton(p.id)}</div>`; }).join('') || '<div class="note">Других игроков пока нет.</div>'}</div>`;
+        <span class="dst ${r.k}">${{war: '⚔ война', just: '⏳ ' + fmtTime(r.left), ally: '🤝 союз', truce: '🕊 перемирие', peace: 'мир'}[r.k]}</span></div>
+        <div class="dact">${diploButton(p.id, true)}</div>`; }).join('') || '<div class="note">Других игроков пока нет.</div>'}</div>`;
   wireDiplo($('#diploPanel'));
   $('#diploPanel').querySelectorAll('[data-ans]').forEach(b => b.onclick = () => G.send({t: 'act', a: {type: 'peaceAnswer', from: b.dataset.from, accept: b.dataset.ans === '1'}}));
+  $('#diploPanel').querySelectorAll('[data-aans]').forEach(b => b.onclick = () => G.send({t: 'act', a: {type: 'allyAnswer', from: b.dataset.from, accept: b.dataset.aans === '1'}}));
 }
 function showPeaceOffer(from, until){
   const q = G.players[from]; if (!q) return;
@@ -1475,6 +1487,15 @@ function showPeaceOffer(from, until){
     <div class="row2"><button class="act" id="mNo">Отказаться</button><button class="act blue" id="mYes">Заключить мир</button></div>`, () => {
     $('#mNo').onclick = () => { G.send({t: 'act', a: {type: 'peaceAnswer', from, accept: false}}); closeModal(); };
     $('#mYes').onclick = () => { G.send({t: 'act', a: {type: 'peaceAnswer', from, accept: true}}); closeModal(); };
+  });
+}
+
+function showAllyOffer(from){
+  const q = G.players[from]; if (!q) return;
+  showModal(`<h3>🤝 Предложение союза</h3><div class="note">Игрок <b>${esc(q.name)}</b> предлагает союз. Союзники не могут воевать друг с другом, а их армии проходят через города союзника без потерь.</div>
+    <div class="row2"><button class="act" id="mNo">Отказаться</button><button class="act blue" id="mYes">Заключить союз</button></div>`, () => {
+    $('#mNo').onclick = () => { G.send({t: 'act', a: {type: 'allyAnswer', from, accept: false}}); closeModal(); };
+    $('#mYes').onclick = () => { G.send({t: 'act', a: {type: 'allyAnswer', from, accept: true}}); closeModal(); };
   });
 }
 
@@ -1537,6 +1558,7 @@ function pickTarget(c){
   const t = G.target; if (!t) return;
   if (c === t.from) return toast('Выберите другой город', 'err');
   const v = cityView(G, gameData, c.id);
+  if (v.o && v.o !== G.you && isAlly(G, G.you, v.o)){ return toast('Это город союзника', 'err'); }
   if (v.o && v.o !== G.you && !atWar(G, G.you, v.o)){ cancelTarget(); openCity(c, false); return toast(`Вы не воюете с игроком ${G.players[v.o].name}. Сначала объявите войну.`, 'err'); }
   cancelTarget(); openSend(t.from, c);
 }
@@ -1551,38 +1573,57 @@ function openSend(from, target){
   if (!srcs.length) return toast(`Нет ваших городов с армией ближе ${RULES.MAX_SEND_KM} км`, 'err');
   let cur = srcs[0];
   const tv = cityView(G, gameData, target.id), own = tv.o === G.you, owner = tv.o ? G.players[tv.o] : null;
-  const body = () => `<h3>${own ? '🪖 Перебросить войска' : '⚔ Атака на «' + esc(target.n) + '»'}</h3>
+  const routeOf = s => s.r || (s.r = findRoute(G, gameData, G.you, s.c.id, target.id));
+  const body = () => {
+    const r = routeOf(cur);
+    G.preview = r.err ? null : r.path; schedule(true);
+    let info;
+    if (r.err) info = `<div class="warnline">⛔ ${esc(r.err)}</div>`;
+    else {
+      const loss = r.foreign.reduce((sum, id) => sum + passLoss(cur.a, cityView(G, gameData, id).a), 0);
+      info = `<div class="note">🛣 ${Math.round(r.km)} км через ${r.path.length - 2} городов · в пути ${fmtTime(r.km / RULES.SPEED_KMS * 1000)}</div>
+        ${r.foreign.length ? `<div class="note">⚠️ Дорога идёт через ${r.foreign.length} чужих городов — армия потеряет около ${fmtInt(Math.min(cur.a, loss))} солдат. Союзники пропускают без потерь.</div>` : '<div class="note">✅ Дорога только через свои и союзные города — без потерь.</div>'}`;
+    }
+    return `<h3>${own ? '🪖 Перебросить войска' : '⚔ Поход на «' + esc(target.n) + '»'}</h3>
       ${own ? '' : `<div class="note">${owner ? esc(owner.name) : tv.reb ? 'Повстанцы' : 'Ничей город'} · защитников: <b>${fmtInt(tv.a)}</b></div>`}
-      <label class="fld">Откуда<select id="mSrc">${srcs.slice(0, 40).map((s, i) => `<option value="${i}" ${s === cur ? 'selected' : ''}>${esc(s.c.n)} — 🪖${fmtInt(s.a)} · в пути ${fmtTime(travelMs(s.d))}</option>`).join('')}</select></label>
-      <label class="fld">Солдат: <b id="mN">${fmtInt(cur.a - 1)}</b><input type="range" id="mR" min="1" max="${cur.a - 1}" value="${cur.a - 1}"></label>
-      <div class="note" id="mHint"></div>
-      <div class="row2"><button class="act" id="mCancel">Отмена</button><button class="act ${own ? 'blue' : 'red'}" id="mGo">${own ? 'Отправить' : 'В поход!'}</button></div>`;
+      <label class="fld">Откуда<select id="mSrc">${srcs.slice(0, 40).map((s, i) => `<option value="${i}" ${s === cur ? 'selected' : ''}>${esc(s.c.n)} — 🪖${fmtInt(s.a)} · ${Math.round(s.d)} км</option>`).join('')}</select></label>
+      ${info}
+      ${r.err ? '' : `<label class="fld">Солдат: <b id="mN">${fmtInt(cur.a - 1)}</b><input type="range" id="mR" min="1" max="${cur.a - 1}" value="${cur.a - 1}"></label>`}
+      <div class="row2"><button class="act" id="mCancel">Отмена</button><button class="act ${own ? 'blue' : 'red'}" id="mGo" ${r.err ? 'disabled' : ''}>${own ? 'Отправить' : 'В поход!'}</button></div>`;
+  };
   const wire = () => {
-    const hint = () => { const n = +$('#mR').value; $('#mN').textContent = fmtInt(n);
-      $('#mHint').innerHTML = own ? `Дойдут за ${fmtTime(travelMs(cur.d))}` : (n > tv.a ? '✅ Сил хватает' : '⚠️ Сил может не хватить') + ` · дойдут за ${fmtTime(travelMs(cur.d))}`; };
-    $('#mR').oninput = hint; hint();
+    if ($('#mR')) $('#mR').oninput = () => $('#mN').textContent = fmtInt(+$('#mR').value);
     $('#mSrc').onchange = () => { cur = srcs[+$('#mSrc').value]; showModal(body(), wire); };
     $('#mCancel').onclick = closeModal;
-    $('#mGo').onclick = () => { G.send({t: 'act', a: {type: 'send', from: cur.c.id, to: target.id, n: +$('#mR').value}}); closeModal(); };
+    $('#mGo').onclick = () => { if (!$('#mR')) return; G.send({t: 'act', a: {type: 'send', from: cur.c.id, to: target.id, n: +$('#mR').value}}); closeModal(); };
   };
   showModal(body(), wire);
 }
 function drawArmies(){
   const now = srvNow(), k = view.k;
+  ctx.save();
+  ctx.setTransform(k * DPR, 0, 0, k * DPR, view.tx * DPR, view.ty * DPR);
+  if (G.preview && $('#modal').classList.contains('open')){
+    ctx.strokeStyle = 'rgba(184,55,43,.9)'; ctx.lineWidth = 3 / k; ctx.setLineDash([7 / k, 5 / k]);
+    ctx.beginPath(); G.preview.forEach((id, i) => { const c = cityById.get(id); if (c) (i ? ctx.lineTo(c.wx, c.wy) : ctx.moveTo(c.wx, c.wy)); }); ctx.stroke();
+  }
+  const marks = [];
   for (const id in G.armies){
-    const a = G.armies[id], f = cityById.get(a.from), t = cityById.get(a.to); if (!f || !t) continue;
+    const a = G.armies[id]; if (!a.path) continue;
     const pos = armyPos(a, gameData, now);
     const x = px(pos.lo), y = py(pos.la);
-    ctx.save();
-    ctx.setTransform(k * DPR, 0, 0, k * DPR, view.tx * DPR, view.ty * DPR);
     ctx.setLineDash([5 / k, 4 / k]); ctx.strokeStyle = ownerColor(a.o); ctx.lineWidth = 2 / k;
-    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(t.wx, t.wy); ctx.stroke(); ctx.setLineDash([]);
-    ctx.restore();
+    ctx.beginPath(); ctx.moveTo(x, y);
+    for (let i = pos.seg; i < a.path.length; i++){ const c = cityById.get(a.path[i]); if (c) ctx.lineTo(c.wx, c.wy); }
+    ctx.stroke();
+    marks.push([a, x, y]);
+  }
+  ctx.setLineDash([]); ctx.restore();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.font = '700 12px Manrope, system-ui, sans-serif';
+  for (const [a, x, y] of marks){
     const [sx, sy] = toScreen(x, y); a.sx = sx; a.sy = sy;
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-    const label = '🪖 ' + fmtShort(a.n);
-    ctx.font = '700 12px Manrope, system-ui, sans-serif';
-    const w = ctx.measureText(label).width + 14;
+    const label = '🪖 ' + fmtShort(a.n), w = ctx.measureText(label).width + 14;
     ctx.fillStyle = ownerColor(a.o); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.roundRect(sx - w / 2, sy - 11, w, 22, 11); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, sx, sy + 0.5);
@@ -1605,7 +1646,7 @@ function openNuke(target){
   });
 }
 function showModal(html, wire){ $('#modalBox').innerHTML = html; $('#modal').classList.add('open'); wire && wire(); }
-function closeModal(){ $('#modal').classList.remove('open'); }
+function closeModal(){ $('#modal').classList.remove('open'); if (G.preview){ G.preview = null; schedule(true); } }
 $('#modal').addEventListener('pointerdown', e => { if (e.target.id === 'modal') closeModal(); });
 
 /* ---------- start screen ---------- */
@@ -1638,8 +1679,8 @@ window.addEventListener('resize', resize);
 
 async function boot(){
   try {
-    const [a, b, l] = await Promise.all(['countries', 'cities', 'lines'].map(n => fetch('data/' + n + '.json').then(r => r.json())));
-    countries = a; cities = b;
+    const [a, b, l, gr] = await Promise.all(['countries', 'cities', 'lines', 'graph'].map(n => fetch('data/' + n + '.json').then(r => r.json())));
+    countries = a; cities = b; window.__graph = gr;
     for (const c of countries) if (l[c.i3]) c.lines = l[c.i3];
   } catch (err){
     $('#loading').innerHTML = '<div>Не удалось загрузить данные карты. Обновите страницу.</div>'; return;
@@ -1662,7 +1703,7 @@ async function boot(){
   W = window.innerWidth; H = window.innerHeight;
   view = homeView();
   resize();
-  gameData = prepareData({c: cities.map(c => [c.id, c.c, c.p, c.la, c.lo, c.cap === 1 ? 1 : 0, c.n]), n: Object.fromEntries(countries.filter(c => c.i2).map(c => [c.i2, c.ru])), g: Object.fromEntries(countries.filter(c => c.i2 && c.gdp).map(c => [c.i2, c.gdp]))});
+  gameData = prepareData({c: cities.map(c => [c.id, c.c, c.p, c.la, c.lo, c.cap === 1 ? 1 : 0, c.n]), nb: window.__graph, n: Object.fromEntries(countries.filter(c => c.i2).map(c => [c.i2, c.ru])), g: Object.fromEntries(countries.filter(c => c.i2 && c.gdp).map(c => [c.i2, c.gdp]))});
   $('#loading').style.display = 'none';
   initStart();
   // territory shapes are only needed for highlighting the chosen city: load them after the map is up

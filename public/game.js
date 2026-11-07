@@ -11,7 +11,9 @@ export const RULES = {
   ARMY_COST: 5,                  // цена солдата
   UPKEEP: 0.01,                  // содержание солдата в секунду
   SPEED_KMS: 12,                 // скорость армии, км в секунду
-  MAX_SEND_KM: 2500,
+  MAX_SEND_KM: 2500,             // по прямой
+  MAX_ROUTE_KM: 4000,            // по дороге через города
+  ALLY_OFFER_MS: 60000,
   TAX_BASE: 25,                  // обычные налоги, %
   DIPLO_MAX: 5,
   JUSTIFY_MS: 240000,            // оправдание войны при дипломатии 1 (делится на уровень)
@@ -48,13 +50,61 @@ const PALETTE = Array.from({length: 60}, (_, i) => `hsl(${Math.round((i * 137.50
 
 export function prepareData(raw){
   const byId = new Map(), byCc = new Map();
-  for (const [id, cc, pop, la, lo, cap, n] of raw.c){
-    const c = {id, cc, pop, la, lo, cap, n};
+  raw.c.forEach(([id, cc, pop, la, lo, cap, n], i) => {
+    const c = {id, cc, pop, la, lo, cap, n, nb: raw.nb ? raw.nb[i] : []};
     byId.set(id, c);
     if (!byCc.has(cc)) byCc.set(cc, []);
     byCc.get(cc).push(c);
-  }
+  });
   return {byId, byCc, names: raw.n || {}, gdp: raw.g || {}};
+}
+
+// ---------- roads between cities ----------
+// How an army of player `pid` relates to a city on its way:
+//  'own' / 'ally' — free passage; 'enemy' — at war: cannot pass, only attack; 'foreign' — neutral or not at war: passes but loses soldiers
+export function passKind(s, pid, v){
+  if (v.o === pid) return 'own';
+  if (v.o && isAlly(s, pid, v.o)) return 'ally';
+  if (v.o && atWar(s, pid, v.o)) return 'enemy';
+  return 'foreign';
+}
+export const passLoss = (n, garrison) => Math.min(n, Math.round(3 + garrison * 0.15 + n * 0.04));
+// cheapest road from city `from` to city `to` (Dijkstra over neighbouring cities)
+export function findRoute(s, data, pid, from, to){
+  const D = data, start = D.byId.get(from), goal = D.byId.get(to);
+  if (!start || !goal) return {err: 'Нет такого города'};
+  const dist = new Map([[from, 0]]), prev = new Map(), km = new Map([[from, 0]]);
+  const heap = [[0, from]];
+  const push = (d, id) => { heap.push([d, id]); let i = heap.length - 1; while (i > 0){ const p = (i - 1) >> 1; if (heap[p][0] <= heap[i][0]) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+  const pop = () => { const top = heap[0], last = heap.pop(); if (heap.length){ heap[0] = last; let i = 0; for (;;){ const l = 2 * i + 1, r = l + 1; let m = i; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
+  let blocker = null, found = false;
+  while (heap.length){
+    const [d, id] = pop();
+    if (d > (dist.get(id) ?? Infinity)) continue;
+    if (id === to){ found = true; break; }
+    const c = D.byId.get(id);
+    if (id !== from){
+      const k = passKind(s, pid, cityView(s, D, id));
+      if (k === 'enemy'){ if (!blocker) blocker = id; continue; }   // can't walk through an enemy city; the first one met is the front line
+    }
+    for (const nid of c.nb){
+      const n = D.byId.get(nid); if (!n) continue;
+      const step = distKm(c, n), tot = km.get(id) + step;
+      if (tot > RULES.MAX_ROUTE_KM) continue;
+      const k = nid === to ? 'own' : passKind(s, pid, cityView(s, D, nid));
+      const w = d + step + (k === 'foreign' ? 250 : 0);       // prefer friendly roads
+      if (w < (dist.get(nid) ?? Infinity)){ dist.set(nid, w); km.set(nid, tot); prev.set(nid, id); push(w, nid); }
+    }
+  }
+  if (!found){
+    if (blocker && distKm(D.byId.get(blocker), goal) < 1500) return {err: `Путь закрыт: сначала захватите ближний вражеский город ${D.byId.get(blocker).n}`, blocker};
+    return {err: 'Туда нет дороги: слишком далеко или через океан'};
+  }
+  const path = [to]; while (path[0] !== from) path.unshift(prev.get(path[0]));
+  let t = 0; const legs = [0];
+  for (let i = 1; i < path.length; i++){ t += distKm(D.byId.get(path[i - 1]), D.byId.get(path[i])); legs.push(t); }
+  const foreign = path.slice(1, -1).filter(id => passKind(s, pid, cityView(s, D, id)) === 'foreign');
+  return {path, km: t, legs, foreign};
 }
 
 // ---------- функции над состоянием (одинаковые в браузере и на сервере) ----------
@@ -72,24 +122,27 @@ export function moodAt(p, now){ return p.ht0 + (p.htg - p.ht0) * (1 - Math.exp(-
 export function nukeStage(p, now){ return (p.nu && now >= p.nu) ? p.nt : p.ns; }
 export function warheads(p, now){ return p.wh + ((p.wb && now >= p.wb) ? 1 : 0); }
 export function atWar(s, a, b){ return !!(a && b && s.wars[warKey(a, b)]); }
+export function isAlly(s, a, b){ return !!(a && b && s.allies && s.allies[warKey(a, b)]); }
 export function warsOf(s, pid){ return Object.values(s.wars).filter(w => w.a === pid || w.b === pid).map(w => w.a === pid ? w.b : w.a); }
 export function armyPos(army, data, now){
-  const f = data.byId.get(army.from), t = data.byId.get(army.to);
-  const k = Math.max(0, Math.min(1, (now - army.start) / (army.arrive - army.start)));
-  return {la: f.la + (t.la - f.la) * k, lo: f.lo + (t.lo - f.lo) * k, k};
+  const P = army.path, ts = army.ts;
+  let i = 1; while (i < ts.length - 1 && ts[i] <= now) i++;
+  const a = data.byId.get(P[i - 1]), b = data.byId.get(P[i]);
+  const k = Math.max(0, Math.min(1, (now - ts[i - 1]) / Math.max(1, ts[i] - ts[i - 1])));
+  return {la: a.la + (b.la - a.la) * k, lo: a.lo + (b.lo - a.lo) * k, seg: i};
 }
 
 export class RoomCore {
   constructor(data, saved, opts = {}){
     this.data = data;
-    this.s = saved && saved.v === 2 ? saved : RoomCore.fresh();
+    this.s = saved && saved.v === 3 ? saved : RoomCore.fresh();
     this.conns = new Set();
     this.name = opts.name || 'room';
     this.onChange = opts.onChange || (() => {});
     this.now = opts.now || (() => Date.now());
   }
-  static fresh(){ return {v: 2, created: Date.now(), players: {}, tokens: {}, cities: {}, taken: {}, news: [], seq: 0, aseq: 0,
-    armies: {}, wars: {}, just: {}, offers: {}, truce: {}, nextCheck: 0, lastActive: Date.now()}; }
+  static fresh(){ return {v: 3, created: Date.now(), players: {}, tokens: {}, cities: {}, taken: {}, news: [], seq: 0, aseq: 0,
+    armies: {}, wars: {}, just: {}, offers: {}, truce: {}, allies: {}, aoffers: {}, nextCheck: 0, lastActive: Date.now()}; }
 
   online(){ let n = 0; for (const c of this.conns) if (!c.bot) n++; return n; }
   isFull(){ return this.online() >= RULES.CAP; }
@@ -188,13 +241,39 @@ export class RoomCore {
         const f = C(a.from), t = C(a.to); if (!f || !t || f === t) return err('Нет такого города');
         if (!own(f.id)) return err('Отправлять можно только из своего города');
         const fe = s.cities[f.id], tv = cityView(s, D, t.id);
-        if (tv.o && tv.o !== p.id && !atWar(s, p.id, tv.o)) return err(`Вы не воюете с игроком ${s.players[tv.o].name}. Сначала объявите войну.`);
+        if (tv.o && tv.o !== p.id && !atWar(s, p.id, tv.o)) return err(isAlly(s, p.id, tv.o) ? 'Это город союзника' : `Вы не воюете с игроком ${s.players[tv.o].name}. Сначала объявите войну.`);
         const d = distKm(f, t); if (d > RULES.MAX_SEND_KM) return err(`Слишком далеко: ${Math.round(d)} км (можно до ${RULES.MAX_SEND_KM})`);
         const n = Math.min(Math.floor(+a.n || 0), fe.a - 1);
         if (n <= 0) return err('В городе должен остаться хотя бы 1 солдат');
+        const r = findRoute(s, D, p.id, f.id, t.id); if (r.err) return err(r.err);
         fe.a -= n; out.cities[f.id] = fe;
         const id = 'a' + (++s.aseq).toString(36);
-        s.armies[id] = out.armies[id] = {id, o: p.id, n, from: f.id, to: t.id, start: now, arrive: now + travelMs(d)};
+        s.armies[id] = out.armies[id] = this.makeArmy(id, p.id, n, r, now);
+        break;
+      }
+      case 'ally': {
+        const q = s.players[a.target]; if (!q || q === p || !q.cc) return err('Нет такого игрока');
+        if (isAlly(s, p.id, q.id)) return err('Вы уже союзники');
+        if (atWar(s, p.id, q.id)) return err('Сначала заключите мир');
+        s.aoffers[p.id + '>' + q.id] = {from: p.id, to: q.id, until: now + RULES.ALLY_OFFER_MS};
+        out.wars = true;
+        this.sendTo(q.id, {t: 'allyOffer', from: p.id, until: now + RULES.ALLY_OFFER_MS});
+        conn.send({t: 'info', msg: `Запрос на союз отправлен игроку ${q.name}`});
+        break;
+      }
+      case 'allyAnswer': {
+        const key = a.from + '>' + p.id, off = s.aoffers[key];
+        if (!off || off.until < now) return err('Запрос уже не действует');
+        delete s.aoffers[key]; out.wars = true;
+        const q = s.players[a.from];
+        if (a.accept){ s.allies[warKey(p.id, q.id)] = {a: q.id, b: p.id, since: now}; this.news(now, `🤝 ${q.name} и ${p.name} заключили союз`, 'diplo', p.id); }
+        else this.sendTo(q.id, {t: 'info', msg: `${p.name} отказался от союза`});
+        break;
+      }
+      case 'unally': {
+        const q = s.players[a.target]; if (!q || !isAlly(s, p.id, q.id)) return err('Вы не союзники');
+        delete s.allies[warKey(p.id, q.id)]; out.wars = true;
+        this.news(now, `💔 ${p.name} разорвал союз с игроком ${q.name}`, 'diplo', p.id);
         break;
       }
       case 'budget': {
@@ -210,6 +289,7 @@ export class RoomCore {
       case 'war': {
         const q = s.players[a.target]; if (!q || q === p || !q.cc) return err('Нет такого игрока');
         if (atWar(s, p.id, q.id)) return err('Вы уже воюете');
+        if (isAlly(s, p.id, q.id)) return err('Это ваш союзник — сначала разорвите союз');
         if (s.just[p.id + '>' + q.id]) return err('Повод для войны уже готовится');
         const tr = s.truce[warKey(p.id, q.id)]; if (tr && tr > now) return err(`Перемирие ещё ${Math.ceil((tr - now) / 1000)} с`);
         s.just[p.id + '>' + q.id] = {a: p.id, b: q.id, until: now + justifyMs(p.dip)};
@@ -277,7 +357,7 @@ export class RoomCore {
     for (let guard = 0; guard < 500; guard++){
       const ev = this.nextEvent(now); if (!ev) break;
       const out = {players: new Set(), cities: {}, armies: {}, wars: false};
-      if (ev.k === 'army') this.arrive(ev.v, ev.t, out);
+      if (ev.k === 'army') this.waypoint(ev.v, ev.t, out);
       else if (ev.k === 'just'){
         delete s.just[ev.id];
         const p = s.players[ev.v.a], q = s.players[ev.v.b];
@@ -289,6 +369,7 @@ export class RoomCore {
         }
         out.wars = true;
       } else if (ev.k === 'offer'){ delete s.offers[ev.id]; out.wars = true; }
+      else if (ev.k === 'aoffer'){ delete s.aoffers[ev.id]; out.wars = true; }
       else if (ev.k === 'check'){ s.nextCheck = now + RULES.CHECK_MS; this.check(now, out); }
       this.finish(out, ev.t);
     }
@@ -296,20 +377,47 @@ export class RoomCore {
   nextEvent(now){
     const s = this.s; let best = null;
     const consider = (t, k, id, v) => { if (t <= now && (!best || t < best.t)) best = {t, k, id, v}; };
-    for (const id in s.armies) consider(s.armies[id].arrive, 'army', id, s.armies[id]);
+    for (const id in s.armies) consider(s.armies[id].ts[s.armies[id].i], 'army', id, s.armies[id]);
     for (const id in s.just) consider(s.just[id].until, 'just', id, s.just[id]);
     for (const id in s.offers) consider(s.offers[id].until, 'offer', id, s.offers[id]);
+    for (const id in s.aoffers) consider(s.aoffers[id].until, 'aoffer', id, s.aoffers[id]);
     if (Object.keys(s.players).length) consider(Math.max(s.nextCheck || 0, 1), 'check');
     return best;
   }
   // when the server should wake up next
   nextDue(){
     const s = this.s; let t = Infinity;
-    for (const id in s.armies) t = Math.min(t, s.armies[id].arrive);
+    for (const id in s.armies) t = Math.min(t, s.armies[id].ts[s.armies[id].i]);
     for (const id in s.just) t = Math.min(t, s.just[id].until);
     for (const id in s.offers) t = Math.min(t, s.offers[id].until);
+    for (const id in s.aoffers) t = Math.min(t, s.aoffers[id].until);
     if (this.online() > 0) t = Math.min(t, s.nextCheck || this.now());
     return t;
+  }
+  makeArmy(id, o, n, r, now){
+    const ts = r.legs.map(km => now + Math.round(km / RULES.SPEED_KMS * 1000));
+    ts[ts.length - 1] = Math.max(ts[ts.length - 1], now + 5000);
+    return {id, o, n, path: r.path, ts, i: 1, from: r.path[0], to: r.path[r.path.length - 1], start: now, arrive: ts[ts.length - 1], lost: 0};
+  }
+  // the army reaches the next city on its road
+  waypoint(army, now, out){
+    const s = this.s, D = this.data, p = s.players[army.o];
+    if (!p){ delete s.armies[army.id]; out.armies[army.id] = null; return; }
+    out.players.add(p.id);
+    const id = army.path[army.i], c = D.byId.get(id), v = cityView(s, D, id);
+    if (army.i === army.path.length - 1) return this.arrive(army, now, out);
+    const k = passKind(s, p.id, v);
+    if (k === 'enemy'){ army.to = id; return this.arrive(army, now, out); }      // the road was cut by a war — fight here
+    if (k === 'foreign'){
+      const loss = passLoss(army.n, v.a);
+      army.n -= loss; army.lost += loss;
+      if (army.n <= 0){
+        delete s.armies[army.id]; out.armies[army.id] = null;
+        this.sendTo(p.id, {t: 'info', msg: `Армия погибла по дороге у города ${c.n}`});
+        return;
+      }
+    }
+    army.i++; out.armies[army.id] = army;
   }
   arrive(army, now, out){
     const s = this.s, D = this.data;
@@ -317,12 +425,13 @@ export class RoomCore {
     const p = s.players[army.o]; if (!p) return;
     const t = D.byId.get(army.to), tv = cityView(s, D, army.to);
     out.players.add(p.id);
+    if (army.lost) this.sendTo(p.id, {t: 'info', msg: `По дороге через чужие города армия потеряла ${army.lost} солдат`});
     if (tv.o === p.id){ s.cities[t.id].a += army.n; out.cities[t.id] = s.cities[t.id]; return; }
     if (tv.o && !atWar(s, p.id, tv.o)){
       // peace was made while marching: the army walks back home
       const back = s.cities[army.from] && s.cities[army.from].o === p.id ? army.from : null;
-      if (back){ const id = 'a' + (++s.aseq).toString(36); const d = distKm(t, D.byId.get(back));
-        s.armies[id] = out.armies[id] = {id, o: p.id, n: army.n, from: t.id, to: back, start: now, arrive: now + travelMs(d)}; }
+      const r = back && findRoute(s, D, p.id, t.id, back);
+      if (r && !r.err){ const id = 'a' + (++s.aseq).toString(36); s.armies[id] = out.armies[id] = this.makeArmy(id, p.id, army.n, r, now); }
       return;
     }
     const prev = tv.o;
@@ -406,7 +515,7 @@ export class RoomCore {
   }
   pub(p){ const {id, name, color, cc, m, t, rate, gross, upkeep, tax, spend, ht0, htg, ht, dip, ns, nt, nu, wh, wb, on, nc, army} = p;
     return {id, name, color, cc, m, t, rate, gross, upkeep, tax, spend, ht0, htg, ht, dip, ns, nt, nu, wh, wb, on, nc, army}; }
-  diploState(){ return {wars: this.s.wars, just: this.s.just, offers: this.s.offers, truce: this.s.truce}; }
+  diploState(){ return {wars: this.s.wars, just: this.s.just, offers: this.s.offers, truce: this.s.truce, allies: this.s.allies, aoffers: this.s.aoffers}; }
   snapshot(){
     const players = {}; for (const id in this.s.players) players[id] = this.pub(this.s.players[id]);
     return {players, cities: this.s.cities, taken: this.s.taken, news: this.s.news.slice(-30), armies: this.s.armies, ...this.diploState()};
@@ -431,6 +540,7 @@ function randToken(){
 export function makeBot(room, name, cc){
   const conn = {bot: true, send(m){
     if (m.t === 'welcome') this.pid = m.you;
+    if (m.t === 'allyOffer') setTimeout(() => room.message(conn, {t: 'act', a: {type: 'allyAnswer', from: m.from, accept: Math.random() < 0.4}}), 5000);
     if (m.t === 'peaceOffer') setTimeout(() => room.message(conn, {t: 'act', a: {type: 'peaceAnswer', from: m.from, accept: Math.random() < 0.6}}), 4000);
   }, close(){}};
   room.connect(conn);
@@ -455,7 +565,7 @@ export function makeBot(room, name, cc){
         const e = s.cities[id]; if (!e || !e.o || e.o === p.id) continue;
         if (Math.abs(c.la - x.c.la) < 6 && Math.abs(c.lo - x.c.lo) < 8 && distKm(x.c, c) < 700) near.add(e.o);
       }
-      for (const q of near){ const qp = s.players[q]; if (qp && qp.army < p.army * 0.8 && !atWar(s, p.id, q)){ room.message(conn, {t: 'act', a: {type: 'war', target: q}}); break; } }
+      for (const q of near){ const qp = s.players[q]; if (qp && qp.army < p.army * 0.8 && !atWar(s, p.id, q) && !isAlly(s, p.id, q)){ room.message(conn, {t: 'act', a: {type: 'war', target: q}}); break; } }
     }
     if (tick % 5 === 0){
       for (const x of best.slice(0, 10)){
@@ -464,6 +574,7 @@ export function makeBot(room, name, cc){
         for (const [id, c] of D.byId){
           if (Math.abs(c.la - x.c.la) > 8 || Math.abs(c.lo - x.c.lo) > 10) continue;
           const v = cityView(s, D, id); if (v.o === p.id || (v.o && !atWar(s, p.id, v.o))) continue;
+          if (!x.c.nb.includes(id)) continue;                      // bots only hit neighbouring cities
           const d = distKm(x.c, c); if (d > 900 || v.a * 1.4 >= x.e.a - 1) continue;
           if (d < td){ td = d; target = id; }
         }
