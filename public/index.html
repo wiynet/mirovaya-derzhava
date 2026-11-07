@@ -646,7 +646,7 @@ function draw(){
     const kk = byIso.get(x.c); if (kk && (kk.bb[2]-kk.bb[0]) * k < 25) continue;
     ctx.fillStyle = ownerFill(G.cities[x.id].o); ctx.fill(x.tpath, 'evenodd');
   }
-  if (G.target && hoverCity && hoverCity.tpath){ ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fill(hoverCity.tpath, 'evenodd'); }
+  if (hoverCity && hoverCity.tpath && hoverCity !== selCity){ ctx.fillStyle = 'rgba(255,255,255,.3)'; ctx.fill(hoverCity.tpath, 'evenodd'); }
   else if (hoverCountry && hoverCountry !== selCountry && !hoverCity){ ctx.fillStyle = 'rgba(255,255,255,.28)'; ctx.fill(cpath(hoverCountry, z), 'evenodd'); }
   if (selCity && selCity.tpath){ ctx.fillStyle = 'rgba(255,255,255,.28)'; ctx.fill(selCity.tpath, 'evenodd'); }
   // built-up areas (real satellite outlines), when zoomed in
@@ -774,6 +774,8 @@ function cityAt(sx, sy, allowTerritory){
   if (best || !allowTerritory) return best;
   const k = countryAt(sx, sy);
   if (!k || !k.i2) return null;
+  // inside a country that is big enough on screen to show city borders, the area belongs to its city
+  if (allowTerritory !== 'any' && !((k.bb[2]-k.bb[0]) * view.k >= LINE_MIN_PX && k.lines)) return null;
   const [wx, wy] = toWorld(sx, sy);
   const c = nearestCity(k, wx, wy);
   if (c) territory(c);
@@ -857,7 +859,7 @@ const tip = $('#tip');
 function showTip(html, x, y){ tip.innerHTML = html; tip.style.display = 'block'; const w = tip.offsetWidth; tip.style.left = Math.min(W - w - 8, x + 14) + 'px'; tip.style.top = (y + 16) + 'px'; }
 function hideTip(){ tip.style.display = 'none'; }
 function hover(x, y){
-  const c = cityAt(x, y, !!G.target);
+  const c = cityAt(x, y, G.target ? 'any' : true);
   const k = countryAt(x, y);
   if (c !== hoverCity || k !== hoverCountry){ hoverCity = c; hoverCountry = k; schedule(); }
   canvas.classList.toggle('hand', !!(c || k));
@@ -872,10 +874,10 @@ function hover(x, y){
 // a click never moves the map; empty land selects the country, a dot or name selects the city
 function click(x, y){
   if (interacting()) return;                       // ignore taps that end a drag/zoom gesture
-  if (G.target){ const c = cityAt(x, y, true); if (c) pickTarget(c); return; }
+  if (G.target){ const c = cityAt(x, y, 'any'); if (c) pickTarget(c); return; }
   const ar = armyAt(x, y); if (ar){ armyInfo(ar); return; }
   if (G.mode === 'choose'){ const k = countryAt(x, y); selectCountry(k, false); return; }
-  const c = cityAt(x, y, false);
+  const c = cityAt(x, y, true);
   if (c){
     // tapping the soldiers next to your own city sends that army
     const ce = G.cities[c.id];
@@ -1000,10 +1002,10 @@ function renderCityPanel(){
     if (v.o){
       actions = diploButton(v.o);
       if (atWar(G, G.you, v.o)){
-        actions = `<div class="note">⚔ Идёт война. Чтобы напасть, нажмите на солдат у своего города рядом и выберите этот город.</div>` + actions;
+        actions = `<button class="act red big" data-a="sendHere">⚔ Атаковать город</button>` + actions;
         if (warheads(me, now) > 0) actions += `<button class="act nuke" data-a="nukeThis">☢ Ядерный удар</button>`;
       }
-    } else actions = `<div class="note">Город никому не принадлежит. Чтобы захватить, отправьте сюда армию из своего города.</div>`;
+    } else actions = `<button class="act red big" data-a="sendHere">⚔ Захватить город<small>${v.reb ? 'повстанцы' : 'ничей'} · защитников ${fmtInt(v.a)}</small></button>`;
   }
   const html = `
     <button class="x" aria-label="Закрыть" id="cpx">×</button>
@@ -1024,6 +1026,7 @@ function cityAction(a, n){
   if (a === 'econ') G.send({t: 'act', a: {type: 'econ', city: c.id}});
   else if (a === 'recruit') G.send({t: 'act', a: {type: 'recruit', city: c.id, n}});
   else if (a === 'send') startTarget(c);
+  else if (a === 'sendHere') openSend(null, c);
   else if (a === 'nukeThis') openNuke(c);
 }
 function closeCity(){ G._panelHtml = null; selCity = null; $('#cityPanel').classList.remove('open'); document.body.classList.remove('city-open'); schedule(); }
